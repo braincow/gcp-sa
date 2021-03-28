@@ -10,7 +10,7 @@ Simple example for acquiring an ID token (JWT):
 
 ```rust
 let authenticator = GoogleServiceAccountAuthenticator::new_from_service_account_key_file(std::path::Path("key.json".to_string())).unwrap();
-let token = authenticator.request_id_token("http://some.url.tld/scope-definition").await.unwrap();
+let token = authenticator.request_id_token("https://my-google-app.endpoint.tld/something").await.unwrap();
 ```
 
 Simple example for acquiring an Access Token:
