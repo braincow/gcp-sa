@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 
-//! Google Cloud Platform Service Account abstraction
+//! Google Cloud Platform Service Account authentication abstraction for Rust
 //!
 //! This crate abstracts OAuth2 [workflow] required when exchanging a GCP Service Account JSON formatted
 //! key to either a ID token or an access token.
