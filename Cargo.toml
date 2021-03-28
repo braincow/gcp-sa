@@ -3,6 +3,7 @@ name = "gcp-sa"
 version = "0.1.0"
 authors = ["Antti Peltonen <antti.peltonen@iki.fi>"]
 edition = "2018"
+license = "MIT"
 license-file = "LICENSE"
 homepage = "https://github.com/braincow/gcp-sa"
 repository = "https://github.com/braincow/gcp-sa"
