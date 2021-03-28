@@ -1,5 +1,5 @@
 [package]
-definition = "Google Cloud Platform Service Account OAuth authentication abstranction"
+description = "Google Cloud Platform Service Account OAuth authentication abstranction"
 name = "gcp-sa"
 version = "0.1.0"
 authors = ["Antti Peltonen <antti.peltonen@iki.fi>"]
