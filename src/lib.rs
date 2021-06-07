@@ -9,8 +9,9 @@
 //!
 //! # Examples
 //!
-//! ```
-//! let authenticator = GoogleServiceAccountAuthenticator::new_from_service_account_key_file(std::path::Path("key.json".to_string())).unwrap();
+//! ```rust
+//! use gcp_sa::GoogleServiceAccountAuthenticator;
+//! let authenticator = GoogleServiceAccountAuthenticator::new_from_service_account_key_file(std::path::Path::new("key.json".to_string())).unwrap();
 //! let id_token = authenticator.request_id_token("http://some.url.tld/scope-definition").await.unwrap();
 //! println!("Authorization: Bearer {}", id_token);
 //! ```
@@ -61,7 +62,7 @@ impl ServiceAccountKey {
 #[derive(Debug, Serialize)]
 struct JWTHeaders;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct JWTPayload {
     iss: String,
     scope: Option<String>,
@@ -83,6 +84,10 @@ impl JWTPayload {
             exp: secs_since_epoc.as_secs() + lifetime,
             iat: secs_since_epoc.as_secs(),
         }
+    }
+
+    fn update_scope(&mut self, new_scope: String) {
+        self.scope = Some(new_scope);
     }
 }
 
@@ -113,15 +118,30 @@ pub struct GoogleIDToken {
     pub id_token: String,
 }
 
+enum GoogleServiceAccountAuthenticatorType {
+    ServiceAccountKey,
+    InstanceMetaData,
+}
+
 /// Authenticator service that ingest a Service Account JSON key file and
 /// communicates with Google's authentication API to exchange it into a
 /// access token or an id token.
 pub struct GoogleServiceAccountAuthenticator {
-    headers: JWTHeaders,
-    payload: JWTPayload,
-    service_account_key: ServiceAccountKey,
+    headers: Option<JWTHeaders>,
+    payload: Option<JWTPayload>,
+    service_account_key: Option<ServiceAccountKey>,
+    authenticator_type: GoogleServiceAccountAuthenticatorType,
 }
 impl GoogleServiceAccountAuthenticator {
+    pub fn new_from_instance_metadata() -> Result<GoogleServiceAccountAuthenticator> {
+        Ok(GoogleServiceAccountAuthenticator {
+            headers: None,
+            payload: None,
+            service_account_key: None,
+            authenticator_type: GoogleServiceAccountAuthenticatorType::InstanceMetaData,
+        })
+    }
+
     /// Function that builds new authenticator struct that later can be used to communicate with
     /// Google's authentication API.
     pub fn new_from_service_account_key_file(
@@ -133,28 +153,40 @@ impl GoogleServiceAccountAuthenticator {
         let payload = JWTPayload::new(service_account_key.client_email.clone());
 
         Ok(GoogleServiceAccountAuthenticator {
-            headers,
-            payload,
-            service_account_key,
+            headers: Some(headers),
+            payload: Some(payload),
+            service_account_key: Some(service_account_key),
+            authenticator_type: GoogleServiceAccountAuthenticatorType::ServiceAccountKey,
         })
     }
 
-    fn create_token(&self) -> Result<String> {
-        let private_key = self.service_account_key.private_key_as_namedtempfile()?;
-        let token = encode(
-            json!(self.headers),
-            &private_key.path().to_path_buf(),
-            &json!(self.payload),
-            Algorithm::RS256,
-        )?;
-        private_key.close()?;
+    fn create_token(&self) -> Result<Option<String>> {
+        let token = match self.authenticator_type {
+            GoogleServiceAccountAuthenticatorType::ServiceAccountKey => {
+                let private_key = self
+                    .service_account_key
+                    .as_ref()
+                    .unwrap()
+                    .private_key_as_namedtempfile()?;
+                let token = encode(
+                    json!(self.headers.as_ref().unwrap()),
+                    &private_key.path().to_path_buf(),
+                    &json!(self.payload.as_ref().unwrap()),
+                    Algorithm::RS256,
+                )?;
+                private_key.close()?;
+                Some(token)
+            }
+            GoogleServiceAccountAuthenticatorType::InstanceMetaData => None,
+        };
+
         Ok(token)
     }
 
     async fn request(&mut self, scope: String) -> Result<String> {
-        self.payload.scope = Some(scope);
+        self.payload.as_mut().unwrap().update_scope(scope);
 
-        let token = self.create_token()?;
+        let token = self.create_token()?.unwrap();
 
         let params = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
@@ -187,17 +219,42 @@ impl GoogleServiceAccountAuthenticator {
 
     /// Request Access Token from Google's authentication API
     pub async fn request_access_token(&mut self) -> Result<GoogleAccessToken> {
-        let text = self
-            .request("https://www.googleapis.com/auth/prediction".to_string())
-            .await?;
-        let access_token: GoogleAccessToken = serde_json::from_str(&text)?;
+        let access_token = match self.authenticator_type {
+            GoogleServiceAccountAuthenticatorType::ServiceAccountKey => {
+                let text = self
+                    .request("https://www.googleapis.com/auth/prediction".to_string())
+                    .await?;
+                let access_token: GoogleAccessToken = serde_json::from_str(&text)?;
+                access_token
+            }
+            GoogleServiceAccountAuthenticatorType::InstanceMetaData => {
+                let body = reqwest::get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token?scopes=https://www.googleapis.com/auth/prediction")
+                    .await?
+                    .text()
+                    .await?;
+                let access_token: GoogleAccessToken = serde_json::from_str(&body)?;
+                access_token
+            }
+        };
         Ok(access_token)
     }
 
     /// Request ID Token (JWT) from Google's authentication API
     pub async fn request_id_token(&mut self, scope: String) -> Result<GoogleIDToken> {
-        let text = self.request(scope).await?;
-        let id_token: GoogleIDToken = serde_json::from_str(&text)?;
+        let id_token = match self.authenticator_type {
+            GoogleServiceAccountAuthenticatorType::ServiceAccountKey => {
+                let text = self.request(scope).await?;
+                let id_token: GoogleIDToken = serde_json::from_str(&text)?;
+                id_token
+            }
+            GoogleServiceAccountAuthenticatorType::InstanceMetaData => {
+                let body = reqwest::get(format!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={scope}", scope = scope))
+                    .await?
+                    .text()
+                    .await?;
+                GoogleIDToken { id_token: body }
+            }
+        };
         Ok(id_token)
     }
 }
@@ -205,6 +262,8 @@ impl GoogleServiceAccountAuthenticator {
 #[cfg(test)]
 mod tests {
     use crate::{GoogleServiceAccountAuthenticator, ServiceAccountKeyType};
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const KEYFILE: &str = "test-service-account.json";
     const PUBFILE: &str = "test-publickey.pem";
@@ -218,11 +277,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            authenticator.service_account_key.r#type,
+            authenticator.service_account_key.as_ref().unwrap().r#type,
             ServiceAccountKeyType::ServiceAccount
         );
         assert_eq!(
-            authenticator.service_account_key.client_email,
+            authenticator
+                .service_account_key
+                .as_ref()
+                .unwrap()
+                .client_email,
             "test-account@test-project-id.iam.gserviceaccount.com".to_string()
         );
     }
@@ -236,9 +299,13 @@ mod tests {
                 std::path::Path::new(KEYFILE),
             )
             .unwrap();
-        authenticator.payload.scope = Some(SCOPE.to_string());
+        authenticator
+            .payload
+            .as_mut()
+            .unwrap()
+            .update_scope(SCOPE.to_string());
 
-        let token = authenticator.create_token().unwrap();
+        let token = authenticator.create_token().unwrap().unwrap();
 
         let (_header, payload) = decode(
             &token,
@@ -252,9 +319,20 @@ mod tests {
 
         assert_eq!(
             payload["iss"],
-            authenticator.service_account_key.client_email
+            authenticator
+                .service_account_key
+                .as_ref()
+                .unwrap()
+                .client_email
         );
         assert_eq!(payload["scope"], SCOPE);
+    }
+
+    #[tokio::test]
+    async fn request_access_token() {
+        // https://www.lpalmieri.com/posts/how-to-write-a-rest-client-in-rust-with-reqwest-and-wiremock/#how-to-test-a-rest-client
+        let _mock_server = MockServer::start().await;
+        todo!()
     }
 }
 
