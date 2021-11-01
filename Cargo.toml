@@ -24,5 +24,5 @@ tempfile = "3.2"
 reqwest = "0.11"
 
 [dev-dependencies]
-tokio = { version = "1.12", features = ["rt", "macros"] }
+tokio = { version = "1.13", features = ["rt", "macros"] }
 wiremock = "0.5"
